@@ -1,6 +1,6 @@
 """
 =============================================================================
-PROCESAMIENTO BATCH LOCAL — PubMed Baseline (~1,200 archivos XML)
+PROCESAMIENTO BATCH WEB — PubMed Baseline (~1,200 archivos XML)
 =============================================================================
 Proyecto: Recuperación Inteligente de Evidencia Científica mediante PLN
 Autora:   Gisela Hernández Santiago — UJAT DACYTI
@@ -29,9 +29,15 @@ import json
 import time
 import logging
 import multiprocessing
+import fnmatch
+import gzip
+import re
+import shutil
 from pathlib import Path
 from datetime import datetime, timedelta
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from urllib.parse import urljoin
+from urllib.request import urlopen
 
 from tqdm import tqdm
 
@@ -44,16 +50,24 @@ from pubmed_pipeline import extraer_articulos_de_xml, guardar_jsonl
 # ─────────────────────────────────────────────────────────────────────────────
 
 CONFIG = {
-    # Carpeta donde están todos tus archivos XML de PubMed
-    "input_dir": r"D:\Datasets",          # Windows
-    # "input_dir": "/home/usuario/pubmed/xmls",  # Linux/Mac
+    # URL oficial de PubMed Baseline
+    "url_baseline": "https://ftp.ncbi.nlm.nih.gov/pubmed/baseline/",
+
+    # Carpeta donde se descargan y descomprimen los XMLs
+    "download_dir": r"C:\Users\Equipo-1\Documents\Proyecto\descargas_pubmed",
 
     # Carpeta donde se guardarán los resultados
     "output_dir": r"C:\Users\Equipo-1\Documents\Proyecto",       # Windows
     # "output_dir": "/home/usuario/pubmed/corpus",  # Linux/Mac
 
-    # Patrón de nombres de archivo (pubmed26n0001.xml, pubmed26n0002.xml, ...)
+    # Patrón de XMLs finales a procesar (después de descomprimir)
     "patron_archivos": "pubmed26n*.xml",
+
+    # Limita cuántos archivos descargar/procesar (None = todos)
+    "max_descargas": 20,
+
+    # Si True, vuelve a descargar y descomprimir aunque ya exista en disco
+    "forzar_redescarga": False,
 
     # Número de núcleos CPU a usar para paralelismo
     # None = detectar automáticamente (usa todos menos 1 para no saturar tu PC)
@@ -62,6 +76,105 @@ CONFIG = {
     # Tamaño del lote por worker (cuántos XMLs procesa cada worker a la vez)
     "batch_size": 4,
 }
+
+
+def listar_archivos_remotos(url_baseline: str, patron_remoto: str) -> list:
+    """Lista nombres de archivo en el índice HTTP del baseline de PubMed."""
+    with urlopen(url_baseline) as response:
+        html = response.read().decode("utf-8", errors="ignore")
+
+    archivos = set()
+    for href in re.findall(r'href=["\']([^"\']+)["\']', html, flags=re.IGNORECASE):
+        nombre = href.split("/")[-1].strip()
+        if nombre and fnmatch.fnmatch(nombre, patron_remoto):
+            archivos.add(nombre)
+
+    return sorted(archivos)
+
+
+def descargar_archivo(url_archivo: str, ruta_destino: str, forzar: bool = False):
+    """Descarga un archivo con barra de progreso."""
+    if os.path.exists(ruta_destino) and not forzar:
+        return
+
+    os.makedirs(os.path.dirname(ruta_destino), exist_ok=True)
+
+    with urlopen(url_archivo) as response, open(ruta_destino, "wb") as out:
+        total = int(response.headers.get("Content-Length") or 0)
+        with tqdm(
+            total=total,
+            unit="B",
+            unit_scale=True,
+            desc=f"Descargando {Path(ruta_destino).name}",
+            leave=False,
+            ncols=80,
+            colour="cyan",
+        ) as barra:
+            while True:
+                bloque = response.read(1024 * 1024)
+                if not bloque:
+                    break
+                out.write(bloque)
+                barra.update(len(bloque))
+
+
+def descomprimir_gzip(ruta_gz: str, ruta_xml: str, forzar: bool = False):
+    """Descomprime un .gz a .xml de forma segura."""
+    if os.path.exists(ruta_xml) and not forzar:
+        return
+
+    os.makedirs(os.path.dirname(ruta_xml), exist_ok=True)
+
+    with gzip.open(ruta_gz, "rb") as src, open(ruta_xml, "wb") as dst:
+        shutil.copyfileobj(src, dst)
+
+
+def preparar_xmls_desde_web(config: dict, log) -> list:
+    """
+    Descarga y descomprime XMLs desde PubMed Baseline.
+
+    Retorna una lista de rutas XML locales listas para procesarse.
+    """
+    url_baseline = config["url_baseline"]
+    if not url_baseline.endswith("/"):
+        url_baseline += "/"
+
+    patron_xml = config["patron_archivos"]
+    patron_remoto = patron_xml if patron_xml.endswith(".gz") else f"{patron_xml}.gz"
+    forzar = config.get("forzar_redescarga", False)
+    max_descargas = config.get("max_descargas")
+
+    log.info(f"Consultando índice remoto: {url_baseline}")
+    remotos = listar_archivos_remotos(url_baseline, patron_remoto)
+
+    if not remotos:
+        log.error(f"No se encontraron archivos remotos con patrón: {patron_remoto}")
+        return []
+
+    if max_descargas:
+        remotos = remotos[:max_descargas]
+
+    download_dir = config["download_dir"]
+    os.makedirs(download_dir, exist_ok=True)
+    xml_locales = []
+
+    log.info(f"Archivos remotos a preparar: {len(remotos):,}")
+
+    for nombre_gz in remotos:
+        url_archivo = urljoin(url_baseline, nombre_gz)
+        ruta_gz = os.path.join(download_dir, nombre_gz)
+        nombre_xml = nombre_gz[:-3] if nombre_gz.endswith(".gz") else nombre_gz
+        ruta_xml = os.path.join(download_dir, nombre_xml)
+
+        log.info(f"Preparando {nombre_gz}")
+        descargar_archivo(url_archivo, ruta_gz, forzar=forzar)
+
+        if nombre_gz.endswith(".gz"):
+            descomprimir_gzip(ruta_gz, ruta_xml, forzar=forzar)
+
+        xml_locales.append(Path(ruta_xml))
+
+    return xml_locales
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LOGGING
@@ -212,7 +325,7 @@ def ejecutar_batch(config: dict):
     Orquesta el procesamiento paralelo de todos los XMLs.
 
     Flujo:
-      1. Detecta todos los XMLs en input_dir
+            1. Descarga y descomprime XMLs desde PubMed Baseline
       2. Filtra los que ya están en el checkpoint
       3. Lanza workers en paralelo con ProcessPoolExecutor
       4. Muestra barra de progreso con tqdm
@@ -225,14 +338,12 @@ def ejecutar_batch(config: dict):
     log = configurar_logging(output_dir)
     checkpoint = Checkpoint(output_dir)
 
-    # ── Detectar archivos ────────────────────────────────────────────────────
-    todos_los_xmls = sorted(
-        Path(config["input_dir"]).glob(config["patron_archivos"])
-    )
+    # ── Descargar y preparar archivos XML ───────────────────────────────────
+    todos_los_xmls = preparar_xmls_desde_web(config, log)
 
     if not todos_los_xmls:
-        log.error(f"No se encontraron XMLs en: {config['input_dir']}")
-        log.error(f"Patrón usado: {config['patron_archivos']}")
+        log.error(f"No se pudieron preparar XMLs desde: {config['url_baseline']}")
+        log.error(f"Patrón usado: {config['patron_archivos']}.gz")
         return
 
     # ── Filtrar pendientes (checkpoint) ─────────────────────────────────────
@@ -361,7 +472,10 @@ if __name__ == "__main__":
   ¿Continuar con la configuración actual? (Ctrl+C para cancelar)
     """)
 
-    print(f"  input_dir  : {CONFIG['input_dir']}")
+    print(f"  fuente     : web")
+    print(f"  url        : {CONFIG['url_baseline']}")
+    print(f"  descargas  : {CONFIG['download_dir']}")
+    print(f"  max archivos: {CONFIG['max_descargas']}")
     print(f"  output_dir : {CONFIG['output_dir']}")
     print(f"  patrón     : {CONFIG['patron_archivos']}")
     print()
