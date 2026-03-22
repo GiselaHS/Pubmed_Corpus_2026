@@ -455,3 +455,136 @@ if __name__ == "__main__":
         procesar_archivo_unico(args.archivo_unico, args.output_dir)
     else:
         ejecutar_pipeline(args.input_dir, args.output_dir, args.patron)
+
+"""
+=============================================================================
+ADICIÓN A pubmed_pipeline.py — Parseo desde bytes en memoria
+=============================================================================
+Agrega esta función a tu pubmed_pipeline.py existente.
+
+El script descarga_ftp.py la importa para procesar los XMLs
+descomprimidos en memoria sin guardarlos en disco.
+=============================================================================
+"""
+
+import xml.etree.ElementTree as ET
+from io import BytesIO
+
+# Copia aquí las funciones existentes de pubmed_pipeline.py
+# (limpiar_texto, extraer_texto_nodo, extraer_abstract,
+#  extraer_anio, calcular_nivel_evidencia, guardar_jsonl)
+# y agrega esta función nueva:
+
+
+def extraer_articulos_de_xml_desde_bytes(xml_bytes: bytes) -> list:
+    """
+    Versión de extraer_articulos_de_xml() que trabaja con bytes en memoria
+    en lugar de un archivo en disco.
+
+    Usada por descarga_ftp.py para procesar XMLs descomprimidos en RAM,
+    sin necesidad de guardar el archivo .gz ni el .xml en disco.
+
+    Args:
+        xml_bytes : Contenido del XML como bytes (ya descomprimido del .gz)
+
+    Retorna:
+        Lista de diccionarios con los campos de cada artículo
+    """
+    try:
+        # Parsear desde bytes en memoria usando BytesIO
+        root = ET.parse(BytesIO(xml_bytes)).getroot()
+    except ET.ParseError as e:
+        raise ValueError(f"XML malformado: {e}")
+
+    lista_articulos = []
+
+    for articulo in root.findall('PubmedArticle'):
+        try:
+            # ── PMID ──────────────────────────────────────────────────────────
+            pmid_node = articulo.find('.//PMID')
+            pmid = pmid_node.text.strip() if pmid_node is not None else "N/A"
+
+            # ── TÍTULO ────────────────────────────────────────────────────────
+            title_node = articulo.find('.//ArticleTitle')
+            titulo = extraer_texto_nodo(title_node) if title_node is not None else ""
+            if not titulo:
+                titulo = "Sin título"
+
+            # ── ABSTRACT ─────────────────────────────────────────────────────
+            abstract_data = extraer_abstract(articulo)
+
+            # ── TIPOS DE PUBLICACIÓN ──────────────────────────────────────────
+            pub_types = [
+                pt.text.strip()
+                for pt in articulo.findall('.//PublicationType')
+                if pt.text
+            ]
+
+            # ── NIVEL DE EVIDENCIA ────────────────────────────────────────────
+            nivel_evidencia = calcular_nivel_evidencia(pub_types)
+
+            # ── TÉRMINOS MESH ─────────────────────────────────────────────────
+            mesh_tags = [
+                m.text.strip()
+                for m in articulo.findall('.//MeshHeading/DescriptorName')
+                if m.text
+            ]
+
+            # ── KEYWORDS ─────────────────────────────────────────────────────
+            keywords = [
+                kw.text.strip()
+                for kw in articulo.findall('.//Keyword')
+                if kw.text
+            ]
+
+            # ── JOURNAL ──────────────────────────────────────────────────────
+            journal_node = articulo.find('.//Journal/Title')
+            journal = journal_node.text.strip() if journal_node is not None and journal_node.text else ""
+
+            issn_node = articulo.find('.//Journal/ISSN')
+            issn = issn_node.text.strip() if issn_node is not None and issn_node.text else ""
+
+            # ── AÑO ───────────────────────────────────────────────────────────
+            anio = extraer_anio(articulo)
+
+            # ── PAÍS ──────────────────────────────────────────────────────────
+            pais_node = articulo.find('.//MedlineJournalInfo/Country')
+            pais = pais_node.text.strip() if pais_node is not None and pais_node.text else ""
+
+            # ── IDIOMA ────────────────────────────────────────────────────────
+            lang_nodes = articulo.findall('.//Language')
+            idioma = lang_nodes[0].text.strip() if lang_nodes else "eng"
+
+            # ── DOI ───────────────────────────────────────────────────────────
+            doi = ""
+            for eid in articulo.findall('.//ArticleId'):
+                if eid.get('IdType') == 'doi' and eid.text:
+                    doi = eid.text.strip()
+                    break
+
+            # ── TEXTO INDEXABLE ───────────────────────────────────────────────
+            texto_indexable = f"{titulo} {abstract_data['abstract_full']}".strip()
+
+            lista_articulos.append({
+                "pmid":              pmid,
+                "titulo":            titulo,
+                "abstract_full":     abstract_data["abstract_full"],
+                # abstract_sections eliminado para ahorrar espacio
+                "tiene_abstract":    abstract_data["tiene_abstract"],
+                "publication_types": pub_types,
+                "nivel_evidencia":   nivel_evidencia,
+                "mesh_tags":         mesh_tags,
+                "keywords":          keywords,
+                "journal":           journal,
+                "issn":              issn,
+                "anio":              anio,
+                "pais_publicacion":  pais,
+                "idioma":            idioma,
+                "doi":               doi,
+                "texto_indexable":   texto_indexable,
+            })
+
+        except Exception:
+            continue
+
+    return lista_articulos
