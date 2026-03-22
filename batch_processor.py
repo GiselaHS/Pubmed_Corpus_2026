@@ -54,17 +54,17 @@ CONFIG = {
     "url_baseline": "https://ftp.ncbi.nlm.nih.gov/pubmed/baseline/",
 
     # Carpeta donde se descargan y descomprimen los XMLs
-    "download_dir": r"C:\Users\Equipo-1\Documents\Proyecto\descargas_pubmed",
+    "download_dir": r"/home/ubuntu/pubmed/temp",
 
     # Carpeta donde se guardarán los resultados
-    "output_dir": r"C:\Users\Equipo-1\Documents\Proyecto",       # Windows
+    "output_dir": r"/home/ubuntu/pubmed/corpus",       # Windows
     # "output_dir": "/home/usuario/pubmed/corpus",  # Linux/Mac
 
     # Patrón de XMLs finales a procesar (después de descomprimir)
     "patron_archivos": "pubmed26n*.xml",
 
     # Limita cuántos archivos descargar/procesar (None = todos)
-    "max_descargas": 20,
+    "max_descargas": 3,
 
     # Si True, vuelve a descargar y descomprimir aunque ya exista en disco
     "forzar_redescarga": False,
