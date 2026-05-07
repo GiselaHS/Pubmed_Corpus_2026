@@ -1,32 +1,20 @@
 """
 =============================================================================
-RECÁLCULO DE NIVEL DE EVIDENCIA — Escala OCEBM Corregida
+RECÁLCULO DE NIVEL DE EVIDENCIA — Escala OCEBM Final
 =============================================================================
 Proyecto: Recuperación Inteligente de Evidencia Científica mediante PLN
 Autora:   Gisela Hernández Santiago — UJAT DACYTI
 
-Correcciones aplicadas respecto a la versión anterior:
+Escala OCEBM adoptada (Nivel 1 = más fuerte, Nivel 5 = más débil):
 
-  1. INVERSIÓN DE ESCALA (sugerencia de directora de tesis):
-     La jerarquía OCEBM estándar usa Nivel 1 para evidencia más fuerte.
-     Esquema anterior (incorrecto): 5=Meta-análisis, 1=Case Reports
-     Esquema corregido (OCEBM):     1=Meta-análisis, 5=Case Reports
-
-  2. JOURNAL ARTICLE FUERA DE LA JERARQUÍA (sugerencia de directora):
-     "Journal Article" es un descriptor de FORMATO en MEDLINE, no de
-     diseño de estudio. Se asigna Nivel 0 (sin información de diseño).
-     Nivel 0 ≠ evidencia débil — significa "diseño no especificado".
-
-Escala OCEBM adaptada:
-  Nivel 1 — Más fuerte : Meta-análisis, Revisión Sistemática
-  Nivel 2              : RCT, Clinical Trial Phase III
-  Nivel 3              : Ensayo Clínico Controlado, Phase I/II/IV,
-                         Multicéntrico, Pragmático
-  Nivel 4              : Observacional, Comparativo, Review Narrativa,
-                         Evaluación, Validación, Gemelos
-  Nivel 5 — Más débil  : Reporte de Caso
-  Nivel 0              : Tipo no especificado (Journal Article, Letter,
-                         Editorial, News, financiamiento, etc.)
+  Nivel 1 — Meta-análisis, Revisión Sistemática
+  Nivel 2 — RCT, Clinical Trial Phase III
+  Nivel 3 — Ensayo Clínico Controlado, Clinical Trial, Phase I/II/IV,
+             Pragmatic Clinical Trial
+  Nivel 4 — Observacional, Comparativo, Evaluación, Validación, Gemelos
+  Nivel 5 — Reporte de Caso
+  Nivel 0 — Tipo no especificado (Journal Article, Letter, Editorial,
+             News, Research Support, English Abstract, etc.)
 
 Uso en EC2:
     source ~/pubmed_env/bin/activate
@@ -45,7 +33,7 @@ from datetime import datetime, timedelta
 from tqdm import tqdm
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CONFIGURACIÓN
+# ★ CONFIGURACIÓN
 # ─────────────────────────────────────────────────────────────────────────────
 
 CONFIG = {
@@ -54,7 +42,7 @@ CONFIG = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MAPEO OCEBM CORREGIDO
+# MAPEO OCEBM FINAL
 # Nivel 1 = más fuerte, Nivel 5 = más débil, Nivel 0 = sin info de diseño
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -71,12 +59,10 @@ NIVELES_EVIDENCIA = {
     "Clinical Trial, Phase I":         3,
     "Clinical Trial, Phase II":        3,
     "Clinical Trial, Phase IV":        3,
-    "Multicenter Study":               3,
     "Pragmatic Clinical Trial":        3,
     # Nivel 4 — Observacional
     "Observational Study":             4,
     "Comparative Study":               4,
-    "Review":                          4,
     "Evaluation Study":                4,
     "Validation Study":                4,
     "Twin Study":                      4,
@@ -86,48 +72,84 @@ NIVELES_EVIDENCIA = {
     # Research Support, English Abstract, Historical Article, etc.
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# FUNCIÓN DE CÁLCULO
+# ─────────────────────────────────────────────────────────────────────────────
 
 def calcular_nivel_evidencia(pub_types_json: str) -> int:
     """
-    Calcula el nivel OCEBM más alto (numéricamente más bajo) del artículo.
-    Retorna 0 si no hay tipos de diseño reconocidos (ej. solo Journal Article).
+    Calcula el nivel OCEBM más fuerte (numéricamente más bajo) del artículo.
+
+    Lógica:
+      - Parsea el JSON de tipos de publicación
+      - Busca cada tipo en NIVELES_EVIDENCIA
+      - Retorna el mínimo encontrado (= nivel más fuerte)
+      - Retorna 0 si ningún tipo está en el mapeo (diseño no especificado)
+
+    Ejemplos:
+      ["RCT", "Journal Article"] → 2  (RCT gana sobre Journal Article)
+      ["Journal Article"]        → 0  (no es nivel de evidencia)
+      ["Case Reports", "Letter"] → 5  (Case Reports gana sobre Letter)
     """
     try:
         pub_types = json.loads(pub_types_json) if pub_types_json else []
     except (json.JSONDecodeError, TypeError):
         return 0
 
-    nivel_min = 99
+    nivel_min  = 99   # centinela — ningún tipo real llega a 99
     encontrado = False
+
     for pt in pub_types:
         nivel = NIVELES_EVIDENCIA.get(pt)
         if nivel is not None:
-            nivel_min = min(nivel_min, nivel)
+            nivel_min  = min(nivel_min, nivel)
             encontrado = True
 
     return nivel_min if encontrado else 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# VERIFICACIÓN DEL MAPEO
+# VERIFICACIÓN DEL MAPEO (corre antes de tocar la DB)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def verificar_mapeo() -> bool:
+    """
+    Prueba unitaria con casos representativos.
+    Si algún caso falla el script se detiene sin modificar la base de datos.
+    """
     casos = [
-        ('["Meta-Analysis", "Systematic Review"]',                     1, "Meta-Analysis + SR → nivel 1"),
-        ('["Randomized Controlled Trial", "Journal Article"]',         2, "RCT + Journal Article → nivel 2"),
-        ('["Clinical Trial, Phase III", "Journal Article"]',           2, "Phase III → nivel 2"),
-        ('["Clinical Trial", "Journal Article"]',                      3, "Clinical Trial → nivel 3"),
-        ('["Controlled Clinical Trial"]',                              3, "CCT → nivel 3"),
-        ('["Observational Study", "Journal Article"]',                 4, "Observacional → nivel 4"),
-        ('["Review", "Journal Article"]',                              4, "Review → nivel 4"),
-        ('["Case Reports", "Journal Article"]',                        5, "Case Report → nivel 5"),
-        ('["Journal Article"]',                                        0, "Solo Journal Article → nivel 0"),
-        ('["Journal Article", "Research Support, Non-U.S. Gov\'t"]',  0, "Journal Article + funding → nivel 0"),
-        ('["Letter"]',                                                 0, "Letter → nivel 0"),
-        ('["Editorial"]',                                              0, "Editorial → nivel 0"),
-        ('["News"]',                                                   0, "News → nivel 0"),
-        ('["Journal Article", "Systematic Review"]',                   1, "Journal Article + SR → nivel 1 (SR gana)"),
+        # Nivel 1
+        ('["Meta-Analysis"]',                                          1, "Meta-Analysis → 1"),
+        ('["Systematic Review"]',                                      1, "Systematic Review → 1"),
+        ('["Meta-Analysis", "Systematic Review"]',                     1, "Meta-Analysis + SR → 1"),
+        ('["Journal Article", "Systematic Review"]',                   1, "Journal Article + SR → 1 (SR gana)"),
+        # Nivel 2
+        ('["Randomized Controlled Trial", "Journal Article"]',         2, "RCT + Journal Article → 2"),
+        ('["Clinical Trial, Phase III", "Journal Article"]',           2, "Phase III → 2"),
+        # Nivel 3
+        ('["Clinical Trial", "Journal Article"]',                      3, "Clinical Trial → 3"),
+        ('["Controlled Clinical Trial"]',                              3, "CCT → 3"),
+        ('["Clinical Trial, Phase I", "Journal Article"]',             3, "Phase I → 3"),
+        ('["Pragmatic Clinical Trial", "Journal Article"]',            3, "Pragmatic → 3"),
+        # Nivel 4
+        ('["Observational Study", "Journal Article"]',                 4, "Observacional → 4"),
+        ('["Comparative Study", "Journal Article"]',                   4, "Comparativo → 4"),
+        ('["Evaluation Study", "Journal Article"]',                    4, "Evaluation → 4"),
+        ('["Validation Study", "Journal Article"]',                    4, "Validation → 4"),
+        ('["Twin Study", "Journal Article"]',                          4, "Twin Study → 4"),
+        # Nivel 5
+        ('["Case Reports", "Journal Article"]',                        5, "Case Reports → 5"),
+        # Nivel 0
+        ('["Journal Article"]',                                        0, "Solo Journal Article → 0"),
+        ('["Journal Article", "Research Support, Non-U.S. Gov\'t"]',  0, "Journal Article + funding → 0"),
+        ('["Letter"]',                                                 0, "Letter → 0"),
+        ('["Editorial"]',                                              0, "Editorial → 0"),
+        ('["News"]',                                                   0, "News → 0"),
+        ('["Comment", "Letter"]',                                      0, "Comment + Letter → 0"),
+        # Múltiples tipos — el más fuerte gana
+        ('["Randomized Controlled Trial", "Multicenter Study", "Journal Article"]',
+                                                                       2, "RCT + Multicenter → 2 (RCT gana)"),
+        ('["Case Reports", "Observational Study"]',                    4, "Case Reports + Observacional → 4 (Obs. gana)"),
     ]
 
     print("\n── Verificación del mapeo OCEBM ─────────────────────────────")
@@ -139,12 +161,14 @@ def verificar_mapeo() -> bool:
             errores += 1
         print(f"  {ok} {desc}")
         if obtenido != esperado:
-            print(f"    Esperado: {esperado} | Obtenido: {obtenido}")
+            print(f"      Esperado: {esperado} | Obtenido: {obtenido}  ← ERROR")
     print("─────────────────────────────────────────────────────────────")
+
     if errores > 0:
-        print(f"  ✗ {errores} casos fallaron — revisa el mapeo\n")
+        print(f"  ✗ {errores} caso(s) fallaron — corrige el mapeo antes de continuar\n")
         return False
-    print(f"  ✓ Todos los casos correctos\n")
+
+    print(f"  ✓ {len(casos)} casos correctos — mapeo validado\n")
     return True
 
 
@@ -183,23 +207,24 @@ def ejecutar_recalculo(config: dict):
     cursor.execute("SELECT COUNT(*) FROM articulos")
     total = cursor.fetchone()[0]
 
+    labels = {
+        0: "Sin info diseño (Journal Article, etc.)",
+        1: "Meta-análisis / Revisión Sistemática",
+        2: "RCT / Clinical Trial Phase III",
+        3: "Ensayo Clínico Controlado / Clinical Trial",
+        4: "Observacional / Comparativo / Evaluación",
+        5: "Reporte de Caso",
+    }
+
     log.info(f"\n{'='*60}")
-    log.info(f"RECÁLCULO NIVEL EVIDENCIA — Escala OCEBM Corregida")
+    log.info(f"RECÁLCULO NIVEL EVIDENCIA — Escala OCEBM Final")
     log.info(f"{'='*60}")
     log.info(f"  Base de datos   : {sqlite_path}")
     log.info(f"  Total registros : {total:,}")
     log.info(f"{'='*60}\n")
 
-    # Snapshot ANTES
-    labels = {
-        0: "Sin info diseño",
-        1: "Meta-análisis / SR",
-        2: "RCT / Phase III",
-        3: "Ensayo Clínico Controlado",
-        4: "Observacional / Review",
-        5: "Case Reports",
-    }
-    log.info("Distribución ANTES:")
+    # ── Snapshot ANTES ───────────────────────────────────────────────────────
+    log.info("Distribución ANTES del recálculo:")
     cursor.execute("""
         SELECT nivel_evidencia, COUNT(*) FROM articulos
         GROUP BY nivel_evidencia ORDER BY nivel_evidencia ASC
@@ -207,17 +232,18 @@ def ejecutar_recalculo(config: dict):
     niveles_antes = {}
     for nivel, cnt in cursor.fetchall():
         niveles_antes[nivel] = cnt
-        log.info(f"  Nivel {nivel} ({labels.get(nivel,'?'):30s}): {cnt:,}")
+        log.info(f"  Nivel {nivel} — {labels.get(nivel,'?'):45s}: {cnt:,}")
 
-    # Leer todos
-    log.info(f"\nLeyendo {total:,} registros...")
+    # ── Leer todos los registros ─────────────────────────────────────────────
+    log.info(f"\nLeyendo {total:,} registros en memoria...")
     cursor.execute("SELECT pmid, publication_types, nivel_evidencia FROM articulos")
     todos = cursor.fetchall()
 
-    # Calcular cambios
-    log.info("Calculando nuevos niveles...")
+    # ── Calcular nuevos niveles ───────────────────────────────────────────────
+    log.info("Calculando nuevos niveles OCEBM...")
     actualizaciones = []
-    sin_cambio = 0
+    sin_cambio      = 0
+
     for pmid, pub_types_json, nivel_actual in todos:
         nivel_nuevo = calcular_nivel_evidencia(pub_types_json)
         if nivel_nuevo != nivel_actual:
@@ -225,18 +251,18 @@ def ejecutar_recalculo(config: dict):
         else:
             sin_cambio += 1
 
-    log.info(f"  A actualizar : {len(actualizaciones):,}")
-    log.info(f"  Sin cambio   : {sin_cambio:,}")
-    del todos
+    log.info(f"  Registros a actualizar : {len(actualizaciones):,}")
+    log.info(f"  Registros sin cambio   : {sin_cambio:,}")
+    del todos  # liberar RAM
 
     if not actualizaciones:
-        log.info("✓ No hay registros que actualizar.")
+        log.info("\n✓ Todos los registros ya tienen el nivel correcto.")
         conn.close()
         return
 
-    # Actualizar en lotes
-    log.info(f"\nActualizando en lotes de {batch_size:,}...")
-    inicio = time.time()
+    # ── Actualizar en lotes ───────────────────────────────────────────────────
+    log.info(f"\nActualizando {len(actualizaciones):,} registros en lotes de {batch_size:,}...")
+    inicio       = time.time()
     actualizados = 0
 
     with tqdm(total=len(actualizaciones), desc="Actualizando",
@@ -254,8 +280,8 @@ def ejecutar_recalculo(config: dict):
 
     tiempo_total = time.time() - inicio
 
-    # Snapshot DESPUÉS
-    log.info("\nDistribución DESPUÉS (escala OCEBM corregida):")
+    # ── Snapshot DESPUÉS ─────────────────────────────────────────────────────
+    log.info("\nDistribución DESPUÉS del recálculo:")
     cursor.execute("""
         SELECT nivel_evidencia, COUNT(*) FROM articulos
         GROUP BY nivel_evidencia ORDER BY nivel_evidencia ASC
@@ -264,18 +290,82 @@ def ejecutar_recalculo(config: dict):
         antes = niveles_antes.get(nivel, 0)
         diff  = cnt - antes
         signo = "+" if diff >= 0 else ""
-        log.info(f"  Nivel {nivel} ({labels.get(nivel,'?'):30s}): {cnt:,}  ({signo}{diff:,})")
+        log.info(
+            f"  Nivel {nivel} — {labels.get(nivel,'?'):45s}: "
+            f"{cnt:,}  ({signo}{diff:,})"
+        )
 
     conn.close()
 
     log.info(f"\n{'='*60}")
-    log.info(f"COMPLETADO")
-    log.info(f"  Actualizados : {actualizados:,}")
-    log.info(f"  Tiempo total : {str(timedelta(seconds=int(tiempo_total)))}")
+    log.info(f"RECÁLCULO COMPLETADO")
+    log.info(f"  Registros actualizados : {actualizados:,}")
+    log.info(f"  Tiempo total           : {str(timedelta(seconds=int(tiempo_total)))}")
     log.info(f"{'='*60}")
-    log.info(f"\nNOTA: Nivel 0 = diseño no especificado en MEDLINE.")
-    log.info(f"No significa evidencia débil. El módulo de ranking")
-    log.info(f"lo trata como valor nulo en el factor de evidencia.")
+    log.info(f"\nNOTA IMPORTANTE:")
+    log.info(f"  Nivel 0 = diseño de estudio no especificado en MEDLINE")
+    log.info(f"  (Journal Article es descriptor de formato, no de diseño)")
+    log.info(f"  El módulo de ranking lo trata como valor nulo.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONSULTAS DE VERIFICACIÓN (para ejecutar después del recálculo)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def consultar_resultados(sqlite_path: str):
+    """
+    Muestra las estadísticas finales del recálculo.
+    Ejecutar después de que termine el proceso principal.
+    """
+    conn   = sqlite3.connect(sqlite_path)
+    cursor = conn.cursor()
+
+    labels = {
+        0: "Sin info diseño",
+        1: "Meta-análisis / SR",
+        2: "RCT / Phase III",
+        3: "Ensayo Clínico Controlado",
+        4: "Observacional / Comparativo",
+        5: "Reporte de Caso",
+    }
+
+    print("\n══════════════════════════════════════════════════════════")
+    print("RESULTADOS FINALES — Distribución por Nivel de Evidencia")
+    print("══════════════════════════════════════════════════════════")
+
+    cursor.execute("SELECT COUNT(*) FROM articulos")
+    total = cursor.fetchone()[0]
+    print(f"\n  Total registros: {total:,}\n")
+
+    cursor.execute("""
+        SELECT nivel_evidencia, COUNT(*) as cnt
+        FROM articulos
+        GROUP BY nivel_evidencia
+        ORDER BY nivel_evidencia ASC
+    """)
+    for nivel, cnt in cursor.fetchall():
+        pct   = cnt / total * 100
+        barra = "█" * int(pct / 2)
+        print(f"  Nivel {nivel} [{barra:<25}] {cnt:>12,}  ({pct:5.2f}%)")
+        print(f"         {labels.get(nivel,'')}")
+
+    print("\n── Artículos con mayor RCR por nivel ────────────────────")
+    for nivel in [1, 2, 3]:
+        cursor.execute("""
+            SELECT pmid, titulo, rcr, citation_count
+            FROM articulos
+            WHERE nivel_evidencia = ? AND rcr IS NOT NULL
+            ORDER BY rcr DESC LIMIT 3
+        """, (nivel,))
+        rows = cursor.fetchall()
+        if rows:
+            print(f"\n  Top 3 Nivel {nivel} por RCR:")
+            for pmid, titulo, rcr, citas in rows:
+                print(f"    PMID {pmid} | RCR={rcr:.2f} | citas={citas:,}")
+                print(f"    {titulo[:70]}...")
+
+    conn.close()
+    print("\n══════════════════════════════════════════════════════════\n")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -285,24 +375,36 @@ def ejecutar_recalculo(config: dict):
 if __name__ == "__main__":
     print("""
 ╔══════════════════════════════════════════════════════════╗
-║   RECÁLCULO NIVEL EVIDENCIA — Escala OCEBM Corregida     ║
+║   RECÁLCULO NIVEL EVIDENCIA — Escala OCEBM Final         ║
 ║   Recuperación Inteligente de Evidencia Científica       ║
 ║   Gisela Hernández Santiago — UJAT DACYTI                ║
 ╚══════════════════════════════════════════════════════════╝
-  Cambios:
-    1. Escala invertida → Nivel 1 = más fuerte (estándar OCEBM)
-    2. Journal Article  → Nivel 0 (formato, no diseño de estudio)
+  Escala:
+    Nivel 1 — Meta-análisis / Revisión Sistemática
+    Nivel 2 — RCT / Clinical Trial Phase III
+    Nivel 3 — Ensayo Clínico Controlado / Clinical Trial
+    Nivel 4 — Observacional / Comparativo / Evaluación
+    Nivel 5 — Reporte de Caso
+    Nivel 0 — Tipo no especificado (Journal Article, etc.)
     """)
     print(f"  sqlite_path : {CONFIG['sqlite_path']}")
     print()
 
+    # Paso 1: verificar el mapeo antes de tocar la DB
     if not verificar_mapeo():
         exit(1)
 
+    # Paso 2: confirmar antes de ejecutar
     try:
-        input("  Presiona ENTER para iniciar (Ctrl+C para cancelar)...\n")
+        input("  Presiona ENTER para iniciar el recálculo (Ctrl+C para cancelar)...\n")
     except KeyboardInterrupt:
         print("\n  Cancelado.")
         exit(0)
 
+    # Paso 3: ejecutar recálculo
     ejecutar_recalculo(CONFIG)
+
+    # Paso 4: mostrar resultados finales
+    print("\n¿Mostrar resultados finales con distribución completa? (s/n): ", end="")
+    if input().strip().lower() == "s":
+        consultar_resultados(CONFIG["sqlite_path"])
