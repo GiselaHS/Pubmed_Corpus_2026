@@ -234,51 +234,63 @@ def ejecutar_recalculo(config: dict):
         niveles_antes[nivel] = cnt
         log.info(f"  Nivel {nivel} — {labels.get(nivel,'?'):45s}: {cnt:,}")
 
-    # ── Leer todos los registros ─────────────────────────────────────────────
-    log.info(f"\nLeyendo {total:,} registros en memoria...")
-    cursor.execute("SELECT pmid, publication_types, nivel_evidencia FROM articulos")
-    todos = cursor.fetchall()
+    # ── Leer, calcular y actualizar en lotes (sin cargar todo en RAM) ──────────
+    log.info(f"\nProcesando {total:,} registros en lotes de {batch_size:,}...")
+    log.info("(Lectura + cálculo + escritura en el mismo ciclo — uso de RAM constante)\n")
 
-    # ── Calcular nuevos niveles ───────────────────────────────────────────────
-    log.info("Calculando nuevos niveles OCEBM...")
-    actualizaciones = []
-    sin_cambio      = 0
+    # Cursor de lectura (separado del cursor de escritura)
+    cur_read = conn.cursor()
+    cur_read.execute("SELECT pmid, publication_types, nivel_evidencia FROM articulos")
 
-    for pmid, pub_types_json, nivel_actual in todos:
-        nivel_nuevo = calcular_nivel_evidencia(pub_types_json)
-        if nivel_nuevo != nivel_actual:
-            actualizaciones.append((nivel_nuevo, pmid))
-        else:
-            sin_cambio += 1
+    inicio        = time.time()
+    actualizados  = 0
+    sin_cambio    = 0
+    procesados    = 0
+    tiempo_total  = 0
 
-    log.info(f"  Registros a actualizar : {len(actualizaciones):,}")
+    with tqdm(total=total, desc="Procesando", unit="reg",
+              ncols=80, colour="green") as barra:
+        while True:
+            lote_lectura = cur_read.fetchmany(batch_size)
+            if not lote_lectura:
+                break
+
+            # Calcular nuevos niveles solo para los que cambian
+            lote_update = []
+            for pmid, pub_types_json, nivel_actual in lote_lectura:
+                nivel_nuevo = calcular_nivel_evidencia(pub_types_json)
+                if nivel_nuevo != nivel_actual:
+                    lote_update.append((nivel_nuevo, pmid))
+                else:
+                    sin_cambio += 1
+
+            # Actualizar solo los registros que cambiaron
+            if lote_update:
+                conn.executemany(
+                    "UPDATE articulos SET nivel_evidencia = ? WHERE pmid = ?",
+                    lote_update
+                )
+                conn.commit()
+                actualizados += len(lote_update)
+
+            procesados += len(lote_lectura)
+            barra.set_postfix({
+                "actualizados": f"{actualizados:,}",
+                "sin_cambio":   f"{sin_cambio:,}",
+            })
+            barra.update(len(lote_lectura))
+
+    log.info(f"\n  Registros procesados   : {procesados:,}")
+    log.info(f"  Registros actualizados : {actualizados:,}")
     log.info(f"  Registros sin cambio   : {sin_cambio:,}")
-    del todos  # liberar RAM
-
-    if not actualizaciones:
-        log.info("\n✓ Todos los registros ya tienen el nivel correcto.")
-        conn.close()
-        return
-
-    # ── Actualizar en lotes ───────────────────────────────────────────────────
-    log.info(f"\nActualizando {len(actualizaciones):,} registros en lotes de {batch_size:,}...")
-    inicio       = time.time()
-    actualizados = 0
-
-    with tqdm(total=len(actualizaciones), desc="Actualizando",
-              unit="reg", ncols=80, colour="green") as barra:
-        for i in range(0, len(actualizaciones), batch_size):
-            lote = actualizaciones[i:i + batch_size]
-            conn.executemany(
-                "UPDATE articulos SET nivel_evidencia = ? WHERE pmid = ?",
-                lote
-            )
-            conn.commit()
-            actualizados += len(lote)
-            barra.set_postfix({"actualizados": f"{actualizados:,}"})
-            barra.update(len(lote))
 
     tiempo_total = time.time() - inicio
+
+    if actualizados == 0:
+        log.info("\n✓ Todos los registros ya tenían el nivel correcto.")
+        log.info(f"  Tiempo total : {str(timedelta(seconds=int(tiempo_total)))}")
+        conn.close()
+        return
 
     # ── Snapshot DESPUÉS ─────────────────────────────────────────────────────
     log.info("\nDistribución DESPUÉS del recálculo:")
